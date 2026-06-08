@@ -80,12 +80,22 @@ class CommentManager(private val context: Context) {
 
     private fun loadFromPrefs() {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        // Read the ordered string. Guard against the old StringSet format (re-import needed).
+        currentIndex = prefs.getInt(KEY_INDEX, 0)
+
         val stored = try { prefs.getString(KEY_COMMENTS, null) } catch (e: ClassCastException) { null }
         if (!stored.isNullOrEmpty()) {
             comments = stored.split("\n").toMutableList()
+        } else {
+            // Migrate the legacy unordered StringSet format so previously-imported comments
+            // aren't lost on upgrade (otherwise the list reads empty and the bot posts the
+            // "Nice post!" fallback). Order is arbitrary until the next CSV re-import.
+            val legacy = try { prefs.getStringSet(KEY_COMMENTS, null) } catch (e: ClassCastException) { null }
+            if (!legacy.isNullOrEmpty()) {
+                comments = legacy.toMutableList()
+                saveToPrefs()  // rewrite in the new ordered format (preserves currentIndex)
+                Log.d(TAG, "Migrated ${comments.size} comments from legacy StringSet storage")
+            }
         }
-        currentIndex = prefs.getInt(KEY_INDEX, 0)
         
         // Safety check
         if (comments.isNotEmpty() && currentIndex >= comments.size) {
