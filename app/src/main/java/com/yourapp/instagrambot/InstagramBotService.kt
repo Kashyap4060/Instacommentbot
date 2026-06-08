@@ -247,13 +247,15 @@ class InstagramBotService : AccessibilityService() {
 
     /** Best-effort author handle for the currently visible reel. */
     private fun currentReelAuthor(root: AccessibilityNodeInfo): String {
-        val byId = findNodeByPartialId(root, "username")
+        val byId = findNodeByResourceId(root, "$IG:id/clips_author_username")
+            ?: findNodeByPartialId(root, "username")
         val text = byId?.text?.toString() ?: byId?.contentDescription?.toString()
         return if (!text.isNullOrBlank()) text.trim() else "this"
     }
 
     private fun likeCurrentPost(root: AccessibilityNodeInfo) {
-        val likeBtn = findNodeByResourceId(root, "$IG:id/row_feed_heart_button")
+        val likeBtn = findNodeByResourceId(root, "$IG:id/like_button")
+            ?: findNodeByResourceId(root, "$IG:id/row_feed_heart_button")
             ?: findNodeByContentDescription(root, "Like")
         performClick(likeBtn)
         delay(500)
@@ -288,18 +290,26 @@ class InstagramBotService : AccessibilityService() {
     }
 
     private fun findCommentButton(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findNodeByResourceId(node, "$IG:id/row_feed_comment_button")
+        // Real Reels id (verified on device): comment_button. Older feed id kept as fallback.
+        return findNodeByResourceId(node, "$IG:id/comment_button")
+            ?: findNodeByResourceId(node, "$IG:id/row_feed_comment_button")
             ?: findNodeByContentDescription(node, "Comment")
             ?: findNodeByText(node, "Comment")
     }
 
     private fun findCommentInputField(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findNodeByResourceId(node, "$IG:id/comment_text_field")
+        // Real comment-composer field (verified on device): the multiline edittext.
+        return findNodeByResourceId(node, "$IG:id/layout_comment_thread_edittext_multiline")
+            ?: findNodeByResourceId(node, "$IG:id/comment_text_field")
             ?: findNodeByResourceId(node, "$IG:id/layout_comment_thread_edittext")
     }
 
     private fun findPostButton(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findNodeByText(node, "Post") ?: findNodeByResourceId(node, "$IG:id/button_post")
+        // Real post button (verified on device): appears once text is entered.
+        return findNodeByResourceId(node, "$IG:id/layout_comment_thread_post_button_icon")
+            ?: findNodeByContentDescription(node, "Post")
+            ?: findNodeByText(node, "Post")
+            ?: findNodeByResourceId(node, "$IG:id/button_post")
     }
 
     private fun performClick(node: AccessibilityNodeInfo?) {
