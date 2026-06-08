@@ -29,6 +29,8 @@ class InstagramBotService : AccessibilityService() {
 
     private val LIKE_CHANCE = 15        // % of reels to like at random (Rule 1)
     private val LOOP_SETTLE_MS = 1200L  // breather between driver-loop passes
+    private val DECIDE_MIN_MS = 10000L  // min "watch the reel" time before deciding
+    private val DECIDE_MAX_MS = 15000L  // max "watch the reel" time before deciding
 
     // Run the (blocking) bot flow off the accessibility main thread so the long
     // Thread.sleep delays never freeze the service / trigger an ANR.
@@ -142,10 +144,20 @@ class InstagramBotService : AccessibilityService() {
     private fun handleReelsFlow(root: AccessibilityNodeInfo) {
         val author = currentReelAuthor(root)
 
+        // Human-like watch/decide time: "watch" the reel for 10–15s before deciding
+        // whether to like, comment, or skip.
+        val thinkMs = Random.nextLong(DECIDE_MIN_MS, DECIDE_MAX_MS + 1)
+        status("Watching ${author}'s reel — deciding (${thinkMs / 1000}s)…")
+        delay(thinkMs)
+        if (!isRunning) return  // honour a Stop pressed during the watch window
+
+        // Re-read the screen: nodes captured before the watch delay may now be stale.
+        val reel = rootInActiveWindow ?: root
+
         // Rule 1: random likes on reels, independent of commenting (~LIKE_CHANCE%).
         if (Random.nextInt(100) < LIKE_CHANCE) {
             status("Liking ${author}'s reel")
-            likeCurrentPost(root)
+            likeCurrentPost(reel)
         }
 
         // Rule 2: skip commenting on ~1 in 10 reels, at random (still like + scroll).
@@ -156,7 +168,7 @@ class InstagramBotService : AccessibilityService() {
             skipComment -> status("Skipping comment on ${author}'s reel (random 1-in-10)")
             !rateLimiter.canPerformAction() ->
                 diag("Not commenting on ${author}'s reel (rate limit/cooldown active)")
-            else -> commentOnCurrentReel(root, author)
+            else -> commentOnCurrentReel(reel, author)
         }
 
         scrollToNextReel()
