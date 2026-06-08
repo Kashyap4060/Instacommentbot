@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Instagram Bot</string>
+    <string name="service_desc">Auto comments on Instagram reels and search results with rate limiting</string>
+</resources>
