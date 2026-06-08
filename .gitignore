@@ -3,3 +3,6 @@ build/
 .idea/
 local.properties
 *.iml
+
+# Java heap dumps (e.g. from build OOMs)
+*.hprof
