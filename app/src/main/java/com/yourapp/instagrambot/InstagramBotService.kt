@@ -27,10 +27,13 @@ class InstagramBotService : AccessibilityService() {
 
     private var commentsPostedThisSession = 0
 
+    private val LIKE_CHANCE = 15        // % of reels to like at random (Rule 1)
+    private val LOOP_SETTLE_MS = 1200L  // breather between driver-loop passes
+
     // Run the (blocking) bot flow off the accessibility main thread so the long
     // Thread.sleep delays never freeze the service / trigger an ANR.
     private val worker = Executors.newSingleThreadExecutor()
-    @Volatile private var isProcessing = false
+    @Volatile private var loopActive = false
     @Volatile private var pendingNavigation = false
 
     // Dedup key so we don't spam logcat with identical screen dumps every event.
@@ -69,24 +72,31 @@ class InstagramBotService : AccessibilityService() {
         isRunning = false
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (!isRunning) return
+    // The bot is driven by a self-scheduling loop (runLoop), NOT by accessibility events:
+    // a settled reel emits no events, so an event-driven loop stalls after one action.
+    // We must implement this callback for the service to run, but it does no work.
+    override fun onAccessibilityEvent(event: AccessibilityEvent) { }
 
-        val packageName = event.packageName?.toString() ?: return
-        if (packageName != IG && packageName != IG_LITE) return
-
-        // Only one flow iteration at a time. Events fire constantly; we coalesce
-        // them into a single background pass.
-        if (isProcessing) return
-        isProcessing = true
-        worker.execute {
-            try {
-                processOnce()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in bot loop", e)
-            } finally {
-                isProcessing = false
+    /**
+     * Self-scheduling driver loop. Runs on the worker thread for the whole session so the
+     * bot advances reel-to-reel on its own. Pacing between comments comes from the
+     * rate-limiter delay inside scrollToNextReel; LOOP_SETTLE_MS is just a brief breather
+     * between passes. Exits when stopBot() clears isRunning.
+     */
+    private fun runLoop() {
+        if (loopActive) return
+        loopActive = true
+        try {
+            while (isRunning) {
+                try {
+                    processOnce()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in bot loop", e)
+                }
+                delay(LOOP_SETTLE_MS)
             }
+        } finally {
+            loopActive = false
         }
     }
 
@@ -130,60 +140,62 @@ class InstagramBotService : AccessibilityService() {
     }
 
     private fun handleReelsFlow(root: AccessibilityNodeInfo) {
-        if (!rateLimiter.canPerformAction()) {
-            diag("Rate limiter: skipping (limit/cooldown active)")
-            return
-        }
-
         val author = currentReelAuthor(root)
 
-        // 1. Deciding to skip (10% chance)
-        if (Random.nextInt(100) < 10) {
-            status("Skipping ${author}'s reel (random skip)")
-            scrollToNextReel()
-            return
-        }
-
-        // 2. Decide to like (30% chance)
-        if (Random.nextInt(100) < 30) {
+        // Rule 1: random likes on reels, independent of commenting (~LIKE_CHANCE%).
+        if (Random.nextInt(100) < LIKE_CHANCE) {
             status("Liking ${author}'s reel")
             likeCurrentPost(root)
         }
 
-        // 3. Commenting
-        val commentButton = findCommentButton(root)
-        if (commentButton != null) {
-            status("Opening comments on ${author}'s reel")
-            performClick(commentButton)
-            delay(1000)
-
-            val freshRoot = rootInActiveWindow ?: return
-            if (checkForBlocks(freshRoot)) return
-
-            val input = findCommentInputField(freshRoot)
-            if (input != null) {
-                val comment = commentManager.getNextComment()
-                setText(input, comment)
-                delay(500)
-
-                val postBtn = findPostButton(freshRoot)
-                if (postBtn != null) {
-                    performClick(postBtn)
-                    rateLimiter.recordAction()
-                    commentsPostedThisSession++
-                    status("Posted on ${author}'s reel: \"$comment\"")
-                    delay(1000)
-                } else {
-                    diag("Post button not found after typing comment")
-                }
-            } else {
-                diag("Comment input field not found after opening comments")
-            }
-        } else {
-            diag("Comment button not found on ${author}'s reel")
+        // Rule 2: skip commenting on ~1 in 10 reels, at random (still like + scroll).
+        val skipComment = Random.nextInt(10) == 0
+        // Comment rate limits (hourly/daily/cooldown) also gate commenting, but never
+        // liking or scrolling — the bot keeps moving so the driver loop can't stall.
+        when {
+            skipComment -> status("Skipping comment on ${author}'s reel (random 1-in-10)")
+            !rateLimiter.canPerformAction() ->
+                diag("Not commenting on ${author}'s reel (rate limit/cooldown active)")
+            else -> commentOnCurrentReel(root, author)
         }
 
         scrollToNextReel()
+    }
+
+    /** Open comments, type the next CSV comment, post it. Assumes commenting is allowed. */
+    private fun commentOnCurrentReel(root: AccessibilityNodeInfo, author: String) {
+        val commentButton = findCommentButton(root)
+        if (commentButton == null) {
+            diag("Comment button not found on ${author}'s reel")
+            return
+        }
+        status("Opening comments on ${author}'s reel")
+        performClick(commentButton)
+        delay(1000)
+
+        val freshRoot = rootInActiveWindow ?: return
+        if (checkForBlocks(freshRoot)) return
+
+        val input = findCommentInputField(freshRoot)
+        if (input == null) {
+            diag("Comment input field not found after opening comments")
+            return
+        }
+
+        val comment = commentManager.getNextComment()
+        setText(input, comment)
+        delay(500)
+
+        val postBtn = findPostButton(freshRoot)
+        if (postBtn == null) {
+            diag("Post button not found after typing comment")
+            return
+        }
+        performClick(postBtn)
+        rateLimiter.recordAction()
+        commentsPostedThisSession++
+        status("Posted on ${author}'s reel: \"$comment\"")
+        delay(1000)
     }
 
     private fun handlePostFlow(root: AccessibilityNodeInfo) {
@@ -261,7 +273,26 @@ class InstagramBotService : AccessibilityService() {
         delay(500)
     }
 
+    /**
+     * Close the comment sheet (and soft keyboard) before swiping, otherwise the
+     * swipe lands inside the still-open comment list and scrolls comments instead
+     * of advancing to the next reel. Up to two back presses: the first dismisses
+     * the keyboard, the second collapses the sheet. Each press is guarded so we
+     * never press back once too many and leave the Reels screen.
+     */
+    private fun closeCommentSheet() {
+        repeat(2) {
+            val root = rootInActiveWindow ?: return
+            // Comment composer gone => sheet already collapsed, nothing to do.
+            if (findCommentInputField(root) == null) return
+            diag("Closing comment sheet before scroll")
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(700)
+        }
+    }
+
     private fun scrollToNextReel() {
+        closeCommentSheet()
         status("Scrolling to next reel…")
         val path = Path().apply {
             moveTo(360f, 1200f)
@@ -468,6 +499,7 @@ class InstagramBotService : AccessibilityService() {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
             status("Instagram launched. Navigating to Reels…")
+            worker.execute { runLoop() }
         } else {
             stopBot()
             status("Instagram not found!")

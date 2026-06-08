@@ -52,6 +52,8 @@ class CommentManager(private val context: Context) {
         
         val comment = comments[currentIndex]
         currentIndex = (currentIndex + 1) % comments.size
+        // Rule 3: after the last comment, currentIndex wraps to 0 and we start over.
+        if (currentIndex == 0) Log.d(TAG, "Reached end of comment list — cycling back to top")
         saveIndex()
         return comment
     }
@@ -61,7 +63,11 @@ class CommentManager(private val context: Context) {
     private fun saveToPrefs() {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
-            putStringSet(KEY_COMMENTS, comments.toSet())
+            // Store as an ordered, newline-joined string. A StringSet (the old format)
+            // loses CSV order and silently drops duplicate comments, so cycling through
+            // the list "from the top" was non-deterministic. CSV is one comment per line,
+            // so embedded newlines aren't a concern.
+            putString(KEY_COMMENTS, comments.joinToString("\n"))
             putInt(KEY_INDEX, currentIndex)
             apply()
         }
@@ -74,9 +80,10 @@ class CommentManager(private val context: Context) {
 
     private fun loadFromPrefs() {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val set = prefs.getStringSet(KEY_COMMENTS, null)
-        if (set != null) {
-            comments = set.toMutableList()
+        // Read the ordered string. Guard against the old StringSet format (re-import needed).
+        val stored = try { prefs.getString(KEY_COMMENTS, null) } catch (e: ClassCastException) { null }
+        if (!stored.isNullOrEmpty()) {
+            comments = stored.split("\n").toMutableList()
         }
         currentIndex = prefs.getInt(KEY_INDEX, 0)
         
