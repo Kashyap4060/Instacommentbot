@@ -15,8 +15,10 @@ class RateLimiter(private val context: Context) {
     // Limits
     private val MAX_COMMENTS_PER_HOUR = 15
     private val MAX_COMMENTS_PER_DAY = 50
-    private val MIN_DELAY_MS = 45000L // 45s
-    private val MAX_DELAY_MS = 90000L // 90s
+    // Brief settle after scrolling so the next reel can load. Human-like pacing now
+    // comes from the 10–15s decide window in InstagramBotService.handleReelsFlow.
+    private val MIN_DELAY_MS = 2000L // 2s
+    private val MAX_DELAY_MS = 5000L // 5s
 
     fun canPerformAction(): Boolean {
         val now = System.currentTimeMillis()
