@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
         val am = getSystemService(ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabled = am.getEnabledAccessibilityServiceList(
             AccessibilityServiceInfo.FEEDBACK_GENERIC
-        )
+        ) ?: emptyList()
         for (service in enabled) {
             val info = service.resolveInfo.serviceInfo
             if (info.packageName == packageName &&

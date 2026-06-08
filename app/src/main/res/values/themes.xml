@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.InstagramBot" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.InstagramBot" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">#833AB4</item>
         <item name="android:windowBackground">@android:color/white</item>
     </style>
