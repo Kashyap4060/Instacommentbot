@@ -2,6 +2,8 @@ package com.yourapp.instagrambot
 
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
@@ -9,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -29,8 +32,12 @@ class MainActivity : ComponentActivity() {
             if (uri != null) viewModel.importCsv(uri)
         }
 
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* status notif is best-effort */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
 
         setContent {
             InstagramBotTheme {
@@ -78,6 +85,17 @@ class MainActivity : ComponentActivity() {
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
