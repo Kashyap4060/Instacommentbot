@@ -31,12 +31,14 @@ class InstagramBotService : AccessibilityService() {
     private val LOOP_SETTLE_MS = 1200L  // breather between driver-loop passes
     private val DECIDE_MIN_MS = 10000L  // min "watch the reel" time before deciding
     private val DECIDE_MAX_MS = 15000L  // max "watch the reel" time before deciding
+    private val UNKNOWN_MAX_RECOVER = 4 // unknown screens in a row before re-navigating to Reels
 
     // Run the (blocking) bot flow off the accessibility main thread so the long
     // Thread.sleep delays never freeze the service / trigger an ANR.
     private val worker = Executors.newSingleThreadExecutor()
     @Volatile private var loopActive = false
     @Volatile private var pendingNavigation = false
+    private var consecutiveUnknown = 0
 
     // Dedup key so we don't spam logcat with identical screen dumps every event.
     private var lastScreenSignature = ""
@@ -123,22 +125,41 @@ class InstagramBotService : AccessibilityService() {
 
         when {
             isReelsScreen(root) -> {
+                consecutiveUnknown = 0
                 diag("Reels screen detected")
                 handleReelsFlow(root)
             }
             isPostScreen(root) -> {
+                consecutiveUnknown = 0
                 diag("Post screen detected")
                 handlePostFlow(root)
             }
             isSearchScreen(root) -> {
+                consecutiveUnknown = 0
                 diag("Search screen detected")
                 handleSearchFlow(root)
             }
-            else -> {
-                diag("Unknown screen — no reel/post/search markers found")
-                dumpScreen(root)
-            }
+            else -> handleUnknownScreen(root)
         }
+    }
+
+    /**
+     * The current screen matched no reel/post/search markers — most often a reel variant we
+     * don't recognise (ads, sponsored, a transient loading frame). Recover by swiping to the
+     * next reel instead of spinning on it. If it keeps happening we've probably drifted off
+     * the Reels feed entirely, so re-navigate to Reels as a stronger recovery.
+     */
+    private fun handleUnknownScreen(root: AccessibilityNodeInfo) {
+        consecutiveUnknown++
+        dumpScreen(root)
+        if (consecutiveUnknown >= UNKNOWN_MAX_RECOVER) {
+            status("Unknown screen x$consecutiveUnknown — navigating back to Reels")
+            consecutiveUnknown = 0
+            pendingNavigation = true
+            return
+        }
+        diag("Unknown screen ($consecutiveUnknown) — swiping to next reel to recover")
+        scrollToNextReel()
     }
 
     private fun handleReelsFlow(root: AccessibilityNodeInfo) {
