@@ -38,6 +38,9 @@ class InstagramBotService : AccessibilityService() {
     private val worker = Executors.newSingleThreadExecutor()
     @Volatile private var loopActive = false
     @Volatile private var pendingNavigation = false
+    @Volatile private var pendingSearch = false   // navigating to a hashtag feed
+    private var searchTextEntered = false          // hashtag already typed + submitted this run
+    @Volatile private var inHashtagFeed = false    // commenting inside a hashtag's media feed
     private var consecutiveUnknown = 0
 
     // Dedup key so we don't spam logcat with identical screen dumps every event.
@@ -123,7 +126,17 @@ class InstagramBotService : AccessibilityService() {
             return
         }
 
+        if (pendingSearch) {
+            navigateToHashtag(root)
+            return
+        }
+
         when {
+            inHashtagFeed -> {
+                consecutiveUnknown = 0
+                diag("Hashtag feed — handling post")
+                handleReelsFlow(root)
+            }
             isReelsScreen(root) -> {
                 consecutiveUnknown = 0
                 diag("Reels screen detected")
@@ -133,11 +146,6 @@ class InstagramBotService : AccessibilityService() {
                 consecutiveUnknown = 0
                 diag("Post screen detected")
                 handlePostFlow(root)
-            }
-            isSearchScreen(root) -> {
-                consecutiveUnknown = 0
-                diag("Search screen detected")
-                handleSearchFlow(root)
             }
             else -> handleUnknownScreen(root)
         }
@@ -249,14 +257,87 @@ class InstagramBotService : AccessibilityService() {
         }
     }
 
-    private fun handleSearchFlow(root: AccessibilityNodeInfo) {
-        // Logic to click the first result if we just searched
-        val firstResult = findNodeByResourceId(root, "$IG:id/row_feed_image_view")
-        if (firstResult != null) {
-            status("Opening first search result")
-            performClick(firstResult)
-        } else {
-            diag("No search result row found yet")
+    /**
+     * Drive Instagram's search UI to a hashtag's media feed, one step per pass. Screen-detection
+     * based (not a fixed step counter) so it tolerates load delays and retries naturally:
+     * each pass figures out which sub-screen we're on and advances. View-ids verified on-device.
+     */
+    private fun navigateToHashtag(root: AccessibilityNodeInfo) {
+        val tag = currentQuery ?: run { pendingSearch = false; return }
+
+        // Furthest step first. 1) Hashtag grid is up → open the first post, enter the feed.
+        val grid = findNodeByResourceId(root, "$IG:id/grid_card_layout_container")
+        if (grid != null) {
+            status("Opening first post under #$tag")
+            performClick(grid)
+            delay(2500)
+            pendingSearch = false
+            inHashtagFeed = true
+            return
+        }
+
+        // 2) Hashtag result rows → tap the exact match, else the first row.
+        val hashtagRow = findHashtagRow(root, tag)
+        if (hashtagRow != null) {
+            status("Opening #$tag")
+            performClick(hashtagRow)
+            delay(2500)
+            return
+        }
+
+        // 3) Submitted, tabs showing but no hashtag rows yet → open the "Tags" tab.
+        if (searchTextEntered) {
+            val tagsTab = findNodeByIdAndText(root, "$IG:id/igds_prism_chip_label", "Tags")
+            if (tagsTab != null) {
+                diag("Opening Tags results for #$tag")
+                performClick(tagsTab)
+                delay(1500)
+                return
+            }
+        }
+
+        // 4) Search input available → type "#tag" once and submit (biases live suggestions to tags).
+        val input = findNodeByResourceId(root, "$IG:id/action_bar_search_edit_text")
+        if (input != null) {
+            if (!searchTextEntered) {
+                status("Searching for #$tag")
+                performClick(input)              // open the typing screen / focus the field
+                delay(800)
+                val fresh = findNodeByResourceId(rootInActiveWindow ?: root,
+                    "$IG:id/action_bar_search_edit_text") ?: input
+                setText(fresh, "#$tag")
+                delay(800)
+                submitSearch(fresh)
+                searchTextEntered = true
+                delay(1500)
+            }
+            return
+        }
+
+        // 5) Not on a search screen yet → open the Search/Explore tab.
+        val searchTab = findNodeByResourceId(root, "$IG:id/search_tab")
+            ?: findNodeByContentDescription(root, "Search and explore")
+        if (searchTab != null) {
+            diag("Opening Search tab")
+            performClick(searchTab)
+            delay(1500)
+            return
+        }
+
+        diag("Search: waiting for a known search screen…")
+        dumpScreen(root)
+    }
+
+    /** Hashtag row matching #tag exactly if present, otherwise the first hashtag row. */
+    private fun findHashtagRow(root: AccessibilityNodeInfo, tag: String): AccessibilityNodeInfo? {
+        return findNodeByIdAndText(root, "$IG:id/row_hashtag_textview_tag_name", "#$tag")
+            ?: findNodeByResourceId(root, "$IG:id/row_hashtag_container")
+    }
+
+    /** Fire the IME "search" action on the focused field (API 30+; the device is Android 11). */
+    private fun submitSearch(input: AccessibilityNodeInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            input.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
         }
     }
 
@@ -284,10 +365,6 @@ class InstagramBotService : AccessibilityService() {
 
     private fun isPostScreen(root: AccessibilityNodeInfo): Boolean {
         return findNodeByResourceId(root, "$IG:id/row_feed_comment_button") != null
-    }
-
-    private fun isSearchScreen(root: AccessibilityNodeInfo): Boolean {
-        return findNodeByResourceId(root, "$IG:id/search_edit_text") != null
     }
 
     /** Best-effort author handle for the currently visible reel. */
@@ -394,6 +471,18 @@ class InstagramBotService : AccessibilityService() {
         if (node.viewIdResourceName == id) return node
         for (i in 0 until node.childCount) {
             val found = findNodeByResourceId(node.getChild(i), id)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    /** Find a node matching both a resource-id and an exact (case-insensitive, trimmed) text. */
+    private fun findNodeByIdAndText(node: AccessibilityNodeInfo?, id: String, text: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.viewIdResourceName == id &&
+            node.text?.toString()?.trim().equals(text, ignoreCase = true)) return node
+        for (i in 0 until node.childCount) {
+            val found = findNodeByIdAndText(node.getChild(i), id, text)
             if (found != null) return found
         }
         return null
@@ -520,9 +609,15 @@ class InstagramBotService : AccessibilityService() {
 
     fun startBot(query: String? = null) {
         isRunning = true
-        currentQuery = query
+        // Normalize: strip a leading '#' and whitespace; blank => no search (generic Reels).
+        val tag = query?.trim()?.removePrefix("#")?.trim()
+        currentQuery = if (tag.isNullOrBlank()) null else tag
         commentsPostedThisSession = 0
-        pendingNavigation = true
+        pendingNavigation = currentQuery == null   // generic Reels feed
+        pendingSearch = currentQuery != null       // hashtag feed
+        searchTextEntered = false
+        inHashtagFeed = false
+        consecutiveUnknown = 0
         lastScreenSignature = ""
 
         val intent = packageManager.getLaunchIntentForPackage(IG)
@@ -531,7 +626,8 @@ class InstagramBotService : AccessibilityService() {
         if (intent != null) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
-            status("Instagram launched. Navigating to Reels…")
+            val dest = currentQuery?.let { "#$it" } ?: "Reels"
+            status("Instagram launched. Navigating to $dest…")
             worker.execute { runLoop() }
         } else {
             stopBot()
@@ -542,6 +638,8 @@ class InstagramBotService : AccessibilityService() {
     fun stopBot() {
         isRunning = false
         pendingNavigation = false
+        pendingSearch = false
+        inHashtagFeed = false
         status("Bot stopped.")
     }
 }
