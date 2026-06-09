@@ -13,8 +13,8 @@ class RateLimiter(private val context: Context) {
     private val KEY_COOLDOWN_UNTIL = "cooldown_until"
 
     // Limits
-    private val MAX_COMMENTS_PER_HOUR = 15
-    private val MAX_COMMENTS_PER_DAY = 50
+    private val MAX_COMMENTS_PER_HOUR = 30
+    // No daily limit (daily count is still tracked for the log line, just not enforced).
     // Brief settle after scrolling so the next reel can load. Human-like pacing now
     // comes from the 10–15s decide window in InstagramBotService.handleReelsFlow.
     private val MIN_DELAY_MS = 2000L // 2s
@@ -32,11 +32,6 @@ class RateLimiter(private val context: Context) {
 
         if (getHourlyCount() >= MAX_COMMENTS_PER_HOUR) {
             Log.d(TAG, "Hourly limit reached.")
-            return false
-        }
-
-        if (getDailyCount() >= MAX_COMMENTS_PER_DAY) {
-            Log.d(TAG, "Daily limit reached.")
             return false
         }
 
