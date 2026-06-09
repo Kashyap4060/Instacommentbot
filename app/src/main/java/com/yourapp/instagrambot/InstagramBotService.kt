@@ -19,8 +19,10 @@ import kotlin.random.Random
 class InstagramBotService : AccessibilityService() {
 
     private val TAG = "BotService"
-    private var isRunning = false
-    private var currentQuery: String? = null
+    // @Volatile: written from the UI thread (start/stopBot), read by the worker loop.
+    // Without it the worker can cache a stale value and Stop never takes effect.
+    @Volatile private var isRunning = false
+    @Volatile private var currentQuery: String? = null
 
     private lateinit var commentManager: CommentManager
     private lateinit var rateLimiter: RateLimiter
@@ -42,6 +44,7 @@ class InstagramBotService : AccessibilityService() {
     private var searchTextEntered = false          // hashtag already typed + submitted this run
     @Volatile private var inHashtagFeed = false    // commenting inside a hashtag's media feed
     private var consecutiveUnknown = 0
+    private var loggedNoWindow = false   // throttle the "no active window" log to once per episode
 
     // Dedup key so we don't spam logcat with identical screen dumps every event.
     private var lastScreenSignature = ""
@@ -109,10 +112,17 @@ class InstagramBotService : AccessibilityService() {
 
     /** One pass of the state machine, run on the background worker thread. */
     private fun processOnce() {
-        val root = rootInActiveWindow ?: run {
-            diag("No active window content available yet")
+        val root = rootInActiveWindow
+        if (root == null) {
+            // Screen off, not on a readable app, or a transition. Throttle so we don't
+            // log this every ~1.2s — once per episode until a window is readable again.
+            if (!loggedNoWindow) {
+                diag("No active window content available yet")
+                loggedNoWindow = true
+            }
             return
         }
+        loggedNoWindow = false
 
         if (pendingNavigation) {
             status("On Instagram — navigating to Reels…")
